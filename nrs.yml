@@ -1,0 +1,10 @@
+app_env: production
+info:
+  name: Nostr Relay Server
+  description: Nostr Relay Server
+  pub_key: ""
+  contact: ""
+  url: http://localhost:3334
+  icon: https://external-content.duckduckgo.com/iu/?u=https://public.bnbstatic.com/image/cms/crawler/COINCU_NEWS/image-495-1024x569.png
+base_path: .
+negentropy: true
