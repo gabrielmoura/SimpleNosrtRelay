@@ -4,6 +4,7 @@ import (
 	"SimpleNosrtRelay/infra/blob"
 	"SimpleNosrtRelay/infra/config"
 	"SimpleNosrtRelay/infra/log"
+	"SimpleNosrtRelay/infra/manager"
 	"SimpleNosrtRelay/infra/metrics"
 	"SimpleNosrtRelay/infra/stream"
 	"context"
@@ -11,6 +12,7 @@ import (
 	"github.com/dgraph-io/badger/v4"
 	eventstore "github.com/fiatjaf/eventstore/badger"
 	"github.com/fiatjaf/eventstore/bluge"
+	"github.com/nbd-wtf/go-nostr/nip86"
 	"go.uber.org/zap"
 	"time"
 
@@ -70,8 +72,13 @@ func main() {
 		},
 	}
 
+	m := manager.NewManager(store.DB)
+	relay.ManagementAPI.ListBannedPubKeys = func(ctx context.Context) ([]nip86.PubKeyReason, error) {
+		return m.ListBannedPubKeys()
+	}
+
 	rls := stream.InitStream(&stream.RelaPool{
-		Relays:     []string{},
+		Relays:     config.Cfg.Stream.Relays,
 		StreamPoll: make([]*nostr.Relay, 0),
 	})
 
@@ -89,7 +96,7 @@ func main() {
 		panic(err)
 	}
 
-	// set up the basic relay functions
+	// StoreEvent is a list of functions that will be called in order to store an event
 	relay.StoreEvent = append(relay.StoreEvent, store.SaveEvent, func(ctx context.Context, event *nostr.Event) error {
 		metrics.NostrKindEventCounter.WithLabelValues(strconv.Itoa(event.Kind)).Inc()
 
@@ -99,18 +106,26 @@ func main() {
 			}
 		}
 		return nil
-	}, search.SaveEvent, rls.ForwardEvent())
+	}, search.SaveEvent, rls.ForwardEvent(), m.SaveEvent)
+
+	// QueryEvents is a list of functions that will be called in order to query events
 	relay.QueryEvents = append(relay.QueryEvents, func(ctx context.Context, filter nostr.Filter) (chan *nostr.Event, error) {
 		for _, kind := range filter.Kinds {
 			metrics.NostrKindReqCounter.WithLabelValues(strconv.Itoa(kind)).Inc()
 		}
 		return store.QueryEvents(ctx, filter)
 	}, search.QueryEvents)
+
+	// DeleteEvent is a list of functions that will be called in order to delete an event
 	relay.DeleteEvent = append(relay.DeleteEvent, store.DeleteEvent, search.DeleteEvent)
+
+	// ReplaceEvent is a list of functions that will be called in order to replace an event
 	relay.ReplaceEvent = append(relay.ReplaceEvent, store.ReplaceEvent, search.ReplaceEvent)
+
+	// CountEvents is a list of functions that will be called in order to count events
 	relay.CountEvents = append(relay.CountEvents, store.CountEvents)
 
-	// there are many other configurable things you can set
+	// RejectEvent is a list of functions that will be called in order to reject an event
 	relay.RejectEvent = append(relay.RejectEvent,
 		// built-in policies
 		policies.ValidateKind,
@@ -132,6 +147,7 @@ func main() {
 			return false, "" // anyone else can
 		},
 		policies.RejectEventsWithBase64Media,
+		m.RejectEvent(),
 	)
 
 	// you can request auth by rejecting an event or a request with the prefix "auth-required: "
@@ -144,13 +160,9 @@ func main() {
 		// define your own policies
 		func(ctx context.Context, filter nostr.Filter) (reject bool, msg string) {
 			if pubkey := khatru.GetAuthed(ctx); pubkey != "" {
-
-				log.Logger.Info("Request from", zap.String("pubkey", pubkey))
-				return false, ""
+				log.Logger.Debug("Request from", zap.String("pubkey", pubkey), zap.String("filter", filter.String()))
 			}
-			return true, "auth-required: only authenticated users can read from this relay"
-			// (this will cause an AUTH message to be sent and then a CLOSED message such that clients can
-			//  authenticate and then request again)
+			return false, ""
 		},
 	)
 	// check the docs for more goodies!
@@ -159,7 +171,7 @@ func main() {
 	// set up other http handlers
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "text/html")
-		fmt.Fprintf(w, `<b>welcome</b> to my relay!`)
+		fmt.Fprintf(w, `<b>welcome</b> to my relay! `+config.Cfg.Info.Url)
 	})
 	mux.Handle("/metrics", promhttp.Handler())
 
@@ -176,7 +188,7 @@ func main() {
 		ExtAcceptable:  []string{".jpg", ".gif", ".png", ".webp", ".mp4"},
 		MaxFileSize:    10 * 1024 * 1024, // 10MB
 		MimeAcceptable: []string{"image/png", "image/jpeg", "image/gif", "image/webp", "video/mp4", "video/webm", "video/ogg"},
-		AuthRequired:   false,
+		AuthRequired:   config.Cfg.Blossom.AuthRequired,
 	})
 
 	bs.Init()
@@ -185,29 +197,22 @@ func main() {
 	bl.StoreBlob = append(bl.StoreBlob, bs.StoreBlob)
 	bl.LoadBlob = append(bl.LoadBlob, bs.LoadBlob)
 	bl.DeleteBlob = append(bl.DeleteBlob, bs.DeleteBlob)
-	bl.RejectUpload = append(bl.RejectUpload, bs.RejectUpload(getAuthed(store.DB)))
+	bl.RejectUpload = append(bl.RejectUpload, bs.RejectUpload(authorizeBlossom(m)))
 
 	// start the server
 	log.Logger.Info("running on :3334")
 	http.ListenAndServe(":3334", relay)
 }
-func getAuthed(db *badger.DB) func(auth *nostr.Event) bool {
+
+func authorizeBlossom(m *manager.Manager) func(auth *nostr.Event) bool {
 	return func(auth *nostr.Event) bool {
 		if auth.PubKey == config.Cfg.Info.PubKey {
 			return true
 		}
-		txn := db.NewTransaction(false)
-		defer txn.Discard()
-		_, err := txn.Get([]byte("authorized:" + auth.PubKey))
-		if err != nil {
-			return false
+		err := m.ValidateResource(auth.PubKey, manager.ResourceBlossom)
+		if err == nil {
+			return true
 		}
-		return true
+		return false
 	}
-}
-func setAuthed(db *badger.DB, pubKey string) error {
-	txn := db.NewTransaction(true)
-	defer txn.Discard()
-	txn.Set([]byte("authorized:"+pubKey), []byte{})
-	return txn.Commit()
 }

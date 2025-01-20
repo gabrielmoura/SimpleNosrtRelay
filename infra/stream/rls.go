@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"SimpleNosrtRelay/infra/config"
 	"SimpleNosrtRelay/infra/log"
 	"context"
 	"github.com/nbd-wtf/go-nostr"
@@ -13,14 +14,17 @@ import (
 var relayInitOnce sync.Once
 
 type RelaPool struct {
+	msg        chan nostr.Event
 	StreamPoll []*nostr.Relay
 	Relays     []string
-	msg        chan nostr.Event
 }
 
 // ForwardEvent encaminha eventos para os relays e processa os eventos.
 func (r *RelaPool) ForwardEvent() func(ctx context.Context, event *nostr.Event) error {
 	return func(ctx context.Context, event *nostr.Event) error {
+		if config.Cfg.Stream.Enabled {
+			return nil
+		}
 		if len(r.StreamPoll) > 0 {
 			r.msg <- *event
 		}
@@ -30,29 +34,31 @@ func (r *RelaPool) ForwardEvent() func(ctx context.Context, event *nostr.Event) 
 
 // PublishEvent encaminha eventos para os relays e processa os eventos.
 func (r *RelaPool) PublishEvent() {
-	for {
-		select {
-		case event := <-r.msg:
-			for _, relay := range r.StreamPoll {
-				if err := relay.Publish(relay.Context(), event); err != nil {
-					log.Logger.Error(
-						"failed to Forward event",
-						zap.String("rs", relay.URL),
+	if config.Cfg.Stream.Enabled {
+		for {
+			select {
+			case event := <-r.msg:
+				for _, relay := range r.StreamPoll {
+					if err := relay.Publish(relay.Context(), event); err != nil {
+						log.Logger.Error(
+							"failed to Forward event",
+							zap.String("rs", relay.URL),
+							zap.String("ID", event.ID),
+							zap.Error(err),
+						)
+						continue
+					}
+					log.Logger.Debug(
+						"Event forwarded",
 						zap.String("ID", event.ID),
-						zap.Error(err),
+						zap.String("rs", relay.URL),
 					)
-					continue
 				}
-				log.Logger.Debug(
-					"Event forwarded",
-					zap.String("ID", event.ID),
-					zap.String("rs", relay.URL),
-				)
+			default:
+				time.Sleep(1 * time.Second)
 			}
-		default:
-			time.Sleep(1 * time.Second)
-		}
 
+		}
 	}
 }
 
