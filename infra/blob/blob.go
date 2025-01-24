@@ -16,8 +16,8 @@ import (
 	"slices"
 )
 
-// BlobConfig holds the configuration for the blob store.
-type BlobConfig struct {
+// Config holds the configuration for the blob store.
+type Config struct {
 	BasePath       string
 	MimeAcceptable []string
 	ExtAcceptable  []string
@@ -25,19 +25,19 @@ type BlobConfig struct {
 	AuthRequired   bool
 }
 
-// BlobStore represents a store for binary large objects.
-type BlobStore struct {
+// Store represents a store for binary large objects.
+type Store struct {
 	db *badger.DB
-	c  *BlobConfig
+	c  *Config
 }
 
-// NewBlobStore creates a new BlobStore instance.
-func NewBlobStore(db *badger.DB, c *BlobConfig) *BlobStore {
-	return &BlobStore{db, c}
+// NewBlobStore creates a new Store instance.
+func NewBlobStore(db *badger.DB, c *Config) *Store {
+	return &Store{db, c}
 }
 
 // StoreBlob stores a blob with the given SHA256 hash as its file name.
-func (bs *BlobStore) StoreBlob(ctx context.Context, sha256 string, body []byte) error {
+func (bs *Store) StoreBlob(ctx context.Context, sha256 string, body []byte) error {
 	metrics.UploadCounter.Inc()
 	fp := filepath.Join(bs.c.BasePath, sha256)
 	return os.WriteFile(fp, body, 0644)
@@ -45,20 +45,20 @@ func (bs *BlobStore) StoreBlob(ctx context.Context, sha256 string, body []byte) 
 
 // LoadBlob retrieves a blob based on its SHA256 hash.
 // It returns an io.ReadSeeker for reading the blob.
-func (bs *BlobStore) LoadBlob(ctx context.Context, sha256 string) (io.ReadSeeker, error) {
+func (bs *Store) LoadBlob(ctx context.Context, sha256 string) (io.ReadSeeker, error) {
 	metrics.DownloadCounter.Inc()
 	fp := filepath.Join(bs.c.BasePath, sha256)
 	return os.Open(fp)
 }
 
 // DeleteBlob deletes a blob based on its SHA256 hash.
-func (bs *BlobStore) DeleteBlob(ctx context.Context, sha256 string) error {
+func (bs *Store) DeleteBlob(ctx context.Context, sha256 string) error {
 	fp := filepath.Join(bs.c.BasePath, sha256)
 	return os.Remove(fp)
 }
 
 // Init initializes the blob storage, creating the base directory if it doesn't exist.
-func (bs *BlobStore) Init() error {
+func (bs *Store) Init() error {
 	// Check if the blobs directory exists; if not, create it.
 	if _, err := os.Stat(bs.c.BasePath); os.IsNotExist(err) {
 		err := os.MkdirAll(bs.c.BasePath, 0755)
@@ -73,7 +73,7 @@ func (bs *BlobStore) Init() error {
 // RejectUpload returns a function that determines if a blob upload should be rejected
 // based on the configuration. It checks for authentication, file size, and extension.
 // funcUserAllow: callback function to check if the user is allowed to upload
-func (bs *BlobStore) RejectUpload(funcUserAllow func(auth *nostr.Event) bool) func(ctx context.Context, auth *nostr.Event, size int, ext string) (bool, string, int) {
+func (bs *Store) RejectUpload(funcUserAllow func(auth *nostr.Event) bool) func(ctx context.Context, auth *nostr.Event, size int, ext string) (bool, string, int) {
 	return func(ctx context.Context, auth *nostr.Event, size int, ext string) (bool, string, int) {
 		// Check if authentication is required.
 		if bs.c.AuthRequired {
